@@ -1,164 +1,34 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <errno.h>
-#include <fstream>
-#define HAVE_STRUCT_TIMESPEC
-#define _CRT_SECURE_NO_WARNINGS
-#pragma warning(disable:4996)
-#include <time.h>
-#include <ws2tcpip.h>
-#include <winsock2.h>
-#pragma comment(lib,"ws2_32.lib")
+#include "Header.h"
 
-#include <string.h>
-#include <signal.h>
-#include <synchapi.h>
-#include <pthread.h>
-#pragma comment(lib, "x86/pthreadVC2.lib")
-#include <Windows.h>
-#pragma comment(lib, "wsock32.lib")
-
-
-#include <Mmsystem.h>
-#pragma comment(lib, "Winmm.lib")
-
-
-
-
-
-pthread_mutex_t logLock; //mutex for the internal log
-pthread_mutex_t bufferLock; //mutex for the internal buffers
-pthread_mutex_t pid_lock;
-pthread_mutex_t pid_lock2;
-bool run_openplc = 1;
-char log_buffer[1000000]; //A very large buffer to store all logs
-int log_index = 0;
-int log_counter = 0;
-
-
-
-void log(char *logmsg)
+void *handleConnections_interactive(void *arguments)
 {
-	pthread_mutex_init(&logLock, NULL);
-	pthread_mutex_lock(&logLock); //lock mutex
-	printf("%s", logmsg);
-	for (int i = 0; logmsg[i] != '\0'; i++)
-	{
-		log_buffer[log_index] = logmsg[i];
-		log_index++;
-		log_buffer[log_index] = '\0';
-	}
+	char log_msg[1024];
+	int client_fd = *(int *)arguments;
+	char buffer[1024];
+	int messageSize;
 
-	log_counter++;
-	if (log_counter >= 1000)
-	{
-		/*Store current log on a file*/
-		log_counter = 0;
-		log_index = 0;
-	}
-	pthread_mutex_unlock(&logLock); //unlock mutex
-}
-
-int getSO_ERROR(int fd)
-{
-	int err = 1;
-	socklen_t len = sizeof err;
-	if (-1 == getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&err, &len))
-		perror("getSO_ERROR");
-	if (err)
-		errno = err;              // set errno to the socket SO_ERROR
-	return err;
-}
-
-void closeSocket(int fd)
-{
-	if (fd >= 0)
-	{
-		getSO_ERROR(fd);
-		if (shutdown(fd, SD_BOTH) < 0) // secondly, terminate the 'reliable' delivery
-			if (errno != WSAENOTCONN  && errno != EINVAL) // SGI causes EINVAL
-				perror("shutdown");
-		if (closesocket(fd) < 0) // finally call close()
-			perror("close");
-	}
-}
-
-int createSocket_interactive(int port)
-{
-	char log_msg[1000];
-	int socket_fd;
-	struct sockaddr_in server_addr;
-
-	//Initial the Socket
-	WSADATA wsd;
-	if (WSAStartup(MAKEWORD(2, 2), &wsd) != 0) {
-		sprintf(log_msg, "Winsock ³õÊ¼»¯Ê§°Ü!\n");
-		log(log_msg);
-		return 1;
-	}
-
-	//Create TCP Socket
-	socket_fd = socket(AF_INET,SOCK_STREAM, IPPROTO_TCP);
-	if (socket_fd < 0)
-	{
-		sprintf(log_msg, "Interactive Server: error creating stream socket => %s\n", strerror(errno));
-		log(log_msg);
-		exit(1);
-	}
-
-	int enable = 1;
-	if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&enable, sizeof(int)) < 0)
-		perror("setsockopt(SO_REUSEADDR) failed");
-
-	//SetSocketBlockingEnabled(socket_fd, false);
-	
-	//Initialize Server Struct
-	memset((char *)&server_addr, 0, sizeof(server_addr));
-	server_addr.sin_family = AF_INET;
-	server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-	server_addr.sin_port = htons(port);
-
-	//Bind socket
-	if (bind(socket_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
-	{
-		sprintf(log_msg, "Interactive Server: error binding socket => %s\n", strerror(errno));
-		log(log_msg);
-		exit(1);
-	}
-
-	//Accept max 5 pending connections
-	listen(socket_fd, 5);
-	sprintf(log_msg, "Interactive Server: Listening on port %d\n", port);
-	log(log_msg);
-	WSACleanup();
-	return socket_fd;
-}
-
-int waitForClient_interactive(int socket_fd)
-{
-	int client_fd;
-	struct sockaddr_in client_addr;
-	socklen_t client_len;
-	
-	printf("Interactive Server: waiting for new client...\n");
-
-	client_len = sizeof(client_addr);
+	printf("Interactive Server: Thread created for client ID: %d\n", client_fd);
 
 	while (run_openplc)
 	{
-		client_fd = accept(socket_fd, (sockaddr *)&client_addr, &client_len); //non-blocking call
-		if (client_fd > 0)
+		messageSize = listenToClient_interactive(client_fd, buffer);
+		if (messageSize <= 0 || messageSize > 1024)
 		{
-			//SetSocketBlockingEnabled(client_fd, true);
-			char log_msg[1000];
-			sprintf(log_msg, "Connect client successfully!");
-			log(log_msg);
+			if (messageSize == 0)
+				printf("Interactive Server: client ID: %d has closed the connection\n", client_fd);
+			else
+				printf("Interactive Server: Something is wrong with the  client ID: %d message Size : %i\n", client_fd, messageSize);
 			break;
 		}
-		Sleep(1000);
+		sprintf(log_msg, "Interactive Server: client has connected! \n");
+		log(log_msg);
 	}
 
-	return client_fd;
+	closeSocket(client_fd);
+	printf("Terminating interactive server connections\r\n");
+	pthread_exit(NULL);
+	return NULL;
 }
 
 void startInteractiveServer(int port)
@@ -178,13 +48,22 @@ void startInteractiveServer(int port)
 		else
 		{
 			int arguments[1];
+			pthread_t thread;
+			int ret = -1;
+
 			printf("Interactive Server: Client accepted! Creating thread for the new client ID: %d...\n", client_fd);
 			arguments[0] = client_fd;
+			ret = pthread_create(&thread, NULL, handleConnections_interactive, arguments);
+			if (ret == 0)
+			{
+				pthread_detach(thread);
+			}
 		}
 	}
 	printf("Closing socket...");
 	closeSocket(socket_fd);
 	closeSocket(client_fd);
+	WSACleanup();
 	sprintf(log_msg, "Terminating interactive server thread \n");
 	log(log_msg);
 }
@@ -206,6 +85,13 @@ int main()
 	pthread_t interactive_thread;
 	pthread_create(&interactive_thread, NULL, interactiveServerThread, NULL);
 
+	if (pthread_mutex_init(&bufferLock, NULL) != 0)
+	{
+		printf("Mutex init failed\n");
+		exit(1);
+	}
+	getchar();
 	system("pause");
+	
 	return 0;
 }
