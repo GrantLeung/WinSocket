@@ -1,84 +1,49 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
-#include "Header.h"
-
-void *handleConnections_interactive(void *arguments)
-{
-	char log_msg[1024];
-	int client_fd = *(int *)arguments;
-	char buffer[1024];
-	int messageSize;
-
-	printf("Interactive Server: Thread created for client ID: %d\n", client_fd);
-
-	while (run_openplc)
-	{
-		messageSize = listenToClient_interactive(client_fd, buffer);
-		if (messageSize <= 0 || messageSize > 1024)
-		{
-			if (messageSize == 0)
-				printf("Interactive Server: client ID: %d has closed the connection\n", client_fd);
-			else
-				printf("Interactive Server: Something is wrong with the  client ID: %d message Size : %i\n", client_fd, messageSize);
-			break;
-		}
-		sprintf(log_msg, "Interactive Server: client has connected! \n");
-		log(log_msg);
-	}
-
-	closeSocket(client_fd);
-	printf("Terminating interactive server connections\r\n");
-	pthread_exit(NULL);
-	return NULL;
+#include <Windows.h>
+extern "C" {
+#include "ladder.h"
 }
 
-void startInteractiveServer(int port)
+pthread_mutex_t bufferLock;
+pthread_mutex_t logLock; //mutex for the internal log
+char log_buffer[1000000]; //A very large buffer to store all logs
+int log_index = 0;
+int log_counter = 0;
+//void startInteractiveServer(int);
+
+void log(unsigned char *logmsg)
 {
-	char log_msg[1000];
-	int socket_fd, client_fd;
-	socket_fd = createSocket_interactive(port);
-	while (run_openplc)
+	pthread_mutex_init(&logLock, NULL);
+	pthread_mutex_lock(&logLock); //lock mutex
+	printf("%s", logmsg);
+	for (int i = 0; logmsg[i] != '\0'; i++)
 	{
-		client_fd = waitForClient_interactive(socket_fd);
-		if (client_fd < 0)
-		{
-			sprintf(log_msg, "Interactive Server: Error accepting client!\n");
-			log(log_msg);
-		}
-
-		else
-		{
-			int arguments[1];
-			pthread_t thread;
-			int ret = -1;
-
-			printf("Interactive Server: Client accepted! Creating thread for the new client ID: %d...\n", client_fd);
-			arguments[0] = client_fd;
-			ret = pthread_create(&thread, NULL, handleConnections_interactive, arguments);
-			if (ret == 0)
-			{
-				pthread_detach(thread);
-			}
-		}
+		log_buffer[log_index] = logmsg[i];
+		log_index++;
+		log_buffer[log_index] = '\0';
 	}
-	printf("Closing socket...");
-	closeSocket(socket_fd);
-	closeSocket(client_fd);
-	WSACleanup();
-	sprintf(log_msg, "Terminating interactive server thread \n");
-	log(log_msg);
+
+	log_counter++;
+	if (log_counter >= 1000)
+	{
+		/*Store current log on a file*/
+		log_counter = 0;
+		log_index = 0;
+	}
+	pthread_mutex_unlock(&logLock); //unlock mutex
 }
 
 void* interactiveServerThread(void*)
 {
 	startInteractiveServer(43628);
-	
 	return NULL;
 }
 
 int main()
 {
-	char log_msg[1000];
-	sprintf(log_msg, "OpenPLC Runtime starting...\n");
+	unsigned char log_msg[1000];
+	sprintf((char*)log_msg, "OpenPLC Runtime starting...\n");
 
 	log(log_msg);
 	
